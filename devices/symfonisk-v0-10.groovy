@@ -1,5 +1,6 @@
 /**
  *  Copyright 2019 Juha Tanskanen
+ *  Copyright 2021 Konnichy
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
@@ -10,11 +11,12 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- *  Sonos Speaker Control
+ *  SYMFONISK Sound remote
  *
  *  Version Author              Note
  *  0.9     Juha Tanskanen      Initial release
  *  0.10    Juha Tanskanen      Standard button enums taken in use, switch level is now the real level
+ *  0.11    Konnichy            Support for devices controlled only with volume up/volume down commands
  *
  */
 
@@ -22,7 +24,7 @@ import groovy.json.JsonOutput
 import physicalgraph.zigbee.zcl.DataType
 
 metadata {
-    definition (name: "SYMFONISK Sound Controller", namespace: "smartthings", author: "Juha Tanskanen", ocfDeviceType: "x.com.st.d.remotecontroller", mcdSync: true) {
+    definition (name: "SYMFONISK Sound remote", namespace: "smartthings", author: "Juha Tanskanen, Konnichy", ocfDeviceType: "x.com.st.d.remotecontroller", mcdSync: true) {
         capability "Actuator"
         capability "Battery"
         capability "Button"
@@ -34,6 +36,10 @@ metadata {
         capability "Health Check"
 
         fingerprint inClusters: "0000, 0001, 0003, 0020, 1000", outClusters: "0003, 0004, 0006, 0008, 0019, 1000", manufacturer: "IKEA of Sweden", model: "SYMFONISK Sound Controller"
+    }
+
+    preferences {
+        input "infiniteScrolling", "bool", title: "Infinite scrolling", description: "Enable this setting if the controlled device: 1) only supports up/down commands, or 2) works with values beyond the range [0-100]. This setting must be set according to what mode the device handler of the controlled device supports.", required: true, displayDuringSetup: true
     }
 
     simulator {
@@ -134,8 +140,13 @@ def installed() {
     sendEvent(name: "numberOfButtons", value: numberOfButtons, displayed: false)
     sendEvent(name: "button", value: "pushed", data: [buttonNumber: REMOTE_BUTTONS.CONTROL_BUTTON], displayed: false)
 
-    def descriptionText = "Switch Level was changed to 0"
-    sendEvent(name: "level", value: 0, descriptionText: descriptionText, isStateChange: true)
+    if (infiniteScrolling) {
+        def descriptionText = "Switch Level initialized to its center position"
+        sendEvent(name: "level", value: 50, descriptionText: descriptionText, isStateChange: true)
+    } else {
+        def descriptionText = "Switch Level initialized to 0"
+        sendEvent(name: "level", value: 0, descriptionText: descriptionText, isStateChange: true)
+    }
 
     sendEvent(name: "DeviceWatch-Enroll", value: JsonOutput.toJson([protocol: "zigbee", scheme:"untracked"]), displayed: false)
 
@@ -166,11 +177,16 @@ def configure() {
 }
 
 def setLevel(value) {
-    def descriptionText = "Switch Level was changed to $value"
-
-    def valueaux = value as Integer
-    state.level = Math.max(Math.min(valueaux, 99), 0)
-    sendEvent(name: "level", value: state.level, descriptionText: descriptionText, isStateChange: true)
+    if (infiniteScrolling) {
+        // Recenter the slider and ignore any action from the mobile app
+        def descriptionText = "Switch Level is changed back to its center position"
+        sendEvent(name: "level", value: 50, descriptionText: descriptionText, isStateChange: true)
+    } else {
+        def descriptionText = "Switch Level was changed to $value"
+        def valueaux = value as Integer
+        state.level = Math.max(Math.min(valueaux, 99), 0)
+        sendEvent(name: "level", value: state.level, descriptionText: descriptionText, isStateChange: true)
+    }
 }
 
 private Map getBatteryEvent(value) {
@@ -251,33 +267,55 @@ private sendLevelEvent(buttonNumber, buttonState) {
             case "up":
                 state.start = now()
                 state.direction = 1
+                if (infiniteScrolling)
+                    sendEvent(name: "level", value: 100, descriptionText: "Level is increasing", isStateChange: true)
                 break
             case "down":
                 state.start = now()
                 state.direction = 0
+                if (infiniteScrolling)
+                    sendEvent(name: "level", value: 1, descriptionText: "Level is decreasing", isStateChange: true)
                 break
             case "held":
                 long iTime = now() - state.start
                 Integer iChange = 0
 
-                // Ignore turns over 4 seconds, probably a lag issue
+                // Ignore long turns, probably a lag issue
                 if (iTime > 4000) {
+                    log.debug "Ignoring suspiciously long rotation ($iTime ms)"
                     iTime = 0
                 }
 
                 // Change based on 4 seconds for full 0-100 change in brightness
                 iChange = iTime/4000 * 100
 
-                state.level = state.direction ? state.level + iChange : state.level - iChange
+                if (infiniteScrolling) {
+                    if (iTime > 0) {
+                        def descriptionText
+                           if (state.direction == 0) {
+                                descriptionText = "Switch level was decreased by $iChange (in $iTime ms)"
+                            iChange = -iChange
+                        } else {
+                            descriptionText = "Switch level was increased by $iChange (in $iTime ms)"
+                        }
+                        log.debug descriptionText
+                        sendEvent(name: "levelChange", value: iChange, descriptionText: descriptionText, isStateChange: true)
+                    }
 
-                if (state.level < 0) {
-                    state.level = 0
-                } else if (state.level > 100) {
-                    state.level = 100
+                    // Reset the slider to its center position
+                    sendEvent(name: "level", value: 50, descriptionText: "Level is steady", isStateChange: true)
+                } else {
+                    state.level = state.direction ? state.level + iChange : state.level - iChange
+
+                    if (state.level < 0) {
+                        state.level = 0
+                    } else if (state.level > 100) {
+                        state.level = 100
+                    }
+
+                    def descriptionText = "Switch Level was changed to $state.level"
+                    sendEvent(name: "level", value: state.level, descriptionText: descriptionText, isStateChange: true)
                 }
-
-                def descriptionText = "Switch Level was changed to $state.level"
-                sendEvent(name: "level", value: state.level, descriptionText: descriptionText, isStateChange: true)
                 break
         }
     }

@@ -1,5 +1,6 @@
 /**
  *  Copyright 2019 Juha Tanskanen
+ *  Copyright 2021 Konnichy
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
@@ -10,20 +11,21 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- *  Sonos Speaker Control
+ *  Remote audio volume control
  *
  *  Version Author              Note
  *  0.9     Juha Tanskanen      Initial release
  *  0.10    Juha Tanskanen      Updated to match changes in SYMFONISK device handler
  *  0.11    Juha Tanskanen      Support for multiple Sonos players (Master/Slaves concept)
+ *  0.12    Konnichy            Support for non-Sonos devices, including those only supporting volume up/volume down commands
  *
  */
 
 definition(
-    name: "Sonos Remote Control",
+    name: "Remote audio volume control",
     namespace: "smartthings",
-    author: "Juha Tanskanen",
-    description: "Control your Sonos system with Ikea SYMFONISK Sound Controller",
+    author: "Juha Tanskanen, Konnichy",
+    description: "Control your audio system with Ikea SYMFONISK Sound remote",
     category: "SmartThings Internal",
     iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
     iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience%402x.png"
@@ -31,10 +33,11 @@ definition(
 
 preferences {
     section("Select your devices") {
-        input "buttonDevice", "capability.button", title: "Sonos Control", multiple: false, required: true
-        input "levelDevice", "capability.switchLevel", title: "Sonos Volume Control", multiple: false, required: true
-        input "sonos", "capability.audioVolume", title: "Sonos Master", multiple: false, required: true
-        input "sonosSlaves", "capability.audioVolume", title: "Sonos Slaves", multiple: true, required: false
+        input "buttonDevice", "capability.button", title: "Control", description: "The device which controls the media (play/pause/next/previous)", multiple: false, required: true
+        input "levelDevice", "capability.switchLevel", title: "Volume control", description: "The device which controls the volume", multiple: false, required: true
+        input "audioDevice", "capability.audioVolume", title: "Controlled device", description: "The audio device whose volume is controlled", multiple: false, required: true
+        input "audioDeviceSlaves", "capability.audioVolume", title: "Controlled slaves", description: "Slave audio devices (if any, e.g. Sonos slaves)", multiple: true, required: false
+        input "directVolumeSupported", "bool", title: "Direct volume value supported?", description: "Disable this parameter if the audio device only supports volume up and volume down commands", defaultValue: true, required: true
     }
 }
 
@@ -54,6 +57,7 @@ def updated() {
 def initialize() {
     subscribe(buttonDevice, "button", buttonEvent)
     subscribe(levelDevice, "level", buttonEvent)
+    subscribe(levelDevice, "levelChange", buttonEvent)
 }
 
 def buttonEvent(evt){
@@ -78,33 +82,48 @@ def handleCommand(command, value) {
         switch (value) {
             case "pushed":
                 log.debug "Button clicked - Play/Pause"
-                def currentStatus = sonos.currentValue("playbackStatus")
-                log.debug "Sonos status $currentStatus"
+                def currentStatus = audioDevice.currentValue("playbackStatus")
+                log.debug "Current status: $currentStatus"
                 if (currentStatus == "playing") {
-                    sonos.pause()
-                    sonosSlaves*.pause()
+                    audioDevice.pause()
+                    audioDeviceSlaves*.pause()
                 } else {
-                    sonos.play()
-                    sonosSlaves*.play()
+                    audioDevice.play()
+                    audioDevice*.play()
                 }
                 break
             case "pushed_2x":
                 log.debug "Button clicked twice - Next Track"
-                sonos.nextTrack()
-                sonosSlaves*.nextTrack()
+                audioDevice.nextTrack()
+                audioDevice*.nextTrack()
                 break
             case "pushed_3x":
                 log.debug "Button clicked treble - Previous Track"
-                sonos.previousTrack()
-                sonosSlaves*.previousTrack()
+                audioDevice.previousTrack()
+                audioDevice*.previousTrack()
                 break
         }
+    } else if (command == "levelChange" && $value != 0) {
+        log.debug "Handling level change $value"
+        def change = Integer.parseInt(value)
+        // Convert the controller's volume change detected to a number of clicks
+        def repeat = Math.round(Math.abs(change) / 5)
+        if (change > 0) {
+            audioDevice.volumeUp(repeat)
+        } else {
+            audioDevice.volumeDown(repeat)
+        }
     } else {
-        Integer currentVolume = sonos.currentValue("volume")
+        log.debug "command=$command"
+        if (!directVolumeSupported) {
+            log.debug "Ignored (the audio device doesn't support direct volume values)"
+            return
+        }
+        Integer currentVolume = audioDevice.currentValue("volume")
         Integer change = value.toInteger() - currentVolume
         Integer newVolume = currentVolume + change
 
-        // This is a workaround to prevent accidental "too big volume change" if Sonos device
+        // This is a workaround to prevent accidental "too big volume change" if the device
         // was controlled through some other device
         if (Math.abs(change) > 20) {
             if (Math.abs(change) > 50) {
@@ -117,8 +136,7 @@ def handleCommand(command, value) {
         }
 
         log.debug "Set volume $currentVolume -> $newVolume"
-        sonos.setVolume(newVolume)
-        sonosSlaves*.setVolume(newVolume)
-
+        audioDevice.setVolume(newVolume)
+        audioDeviceSlaves*.setVolume(newVolume)
     }
 }
